@@ -1,0 +1,56 @@
+name: wq-simulate
+
+# 云端模拟流水线: dispatch 指定任务脚本与参数;结果入 Neon sim_results。
+on:
+  schedule:
+    - cron: "*/20 * * * *"     # 每20分钟消费一次队列
+  workflow_dispatch:
+    inputs:
+      script:
+        description: "jobs/ 下的脚本名(不带 .py)"
+        required: true
+        default: "msim_runner"
+      args:
+        description: "脚本参数(空格分隔)"
+        required: false
+        default: ""
+
+concurrency:
+  group: wq-simulate            # 同时只跑一个模拟批,尊重平台并发
+  cancel-in-progress: false
+
+jobs:
+  simulate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Run batch
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          WQ_EMAIL: ${{ secrets.WQ_EMAIL }}
+          WQ_PASSWORD: ${{ secrets.WQ_PASSWORD }}
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            python -u jobs/queue_worker.py
+          else
+            python -u jobs/${{ github.event.inputs.script }}.py ${{ github.event.inputs.args }}
+          fi
+      - name: Persist results to Neon
+        if: always()
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -u jobs/persist_results.py
+      - name: Upload jsonl artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sim-data-${{ github.run_id }}
+          path: data/
+          if-no-files-found: ignore
+          retention-days: 14

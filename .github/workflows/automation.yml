@@ -1,0 +1,80 @@
+name: wq-automation
+
+on:
+  push:
+    paths: [".github/workflows/automation.yml"]
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "要运行的任务"
+        required: true
+        default: "healthcheck"
+        type: choice
+        options: [healthcheck, inventory, report]
+  schedule:
+    # 每天 01:30 UTC 增量同步库存;10:00 UTC(北京 18:00)出日报
+    - cron: "30 1 * * *"
+    - cron: "0 10 * * *"
+
+concurrency:
+  group: wq-automation
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Decide job
+        id: decide
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            if [ "${{ github.event.schedule }}" = "0 10 * * *" ]; then JOB=report; else JOB=inventory; fi
+          else
+            JOB="${{ github.event.inputs.job || 'healthcheck' }}"
+          fi
+          echo "job=$JOB" >> "$GITHUB_OUTPUT"
+          echo "运行任务: $JOB"
+
+      - name: Run job
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          WQ_EMAIL: ${{ secrets.WQ_EMAIL }}
+          WQ_PASSWORD: ${{ secrets.WQ_PASSWORD }}
+        run: |
+          JOB="${{ steps.decide.outputs.job }}"
+          if [ "$JOB" = "report" ]; then
+            mkdir -p reports
+            python jobs/report.py | tee "reports/$(date +%F).md"
+          else
+            python jobs/$JOB.py
+          fi
+
+      - name: Commit report & update issue
+        if: steps.decide.outputs.job == 'report'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "wq-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add reports/ && git commit -m "report: $(date +%F)" && git push || echo "无变更"
+          # 更新(或创建)置顶日报 issue
+          N=$(gh issue list -R "$GITHUB_REPOSITORY" --search "in:title 日报" --state open --json number -q '.[0].number')
+          if [ -z "$N" ]; then
+            gh issue create -R "$GITHUB_REPOSITORY" -t "📈 WQ 自动化日报" -F "reports/$(date +%F).md"
+          else
+            gh issue comment "$N" -R "$GITHUB_REPOSITORY" -F "reports/$(date +%F).md"
+          fi
