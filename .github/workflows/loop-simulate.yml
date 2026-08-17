@@ -105,10 +105,22 @@ jobs:
         working-directory: src
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          WQ_EMAIL: ${{ secrets.WQ_EMAIL }}
+          WQ_PASSWORD: ${{ secrets.WQ_PASSWORD }}
         run: |
           set +e
           LOG="reports/loop/simulate-$(date -u +%Y-%m).log"
           python -u jobs/persist_results.py >> "$LOG" 2>&1
+          # 库存同步必须跟在跑批之后 —— 这是新产出出现的时刻。
+          # 它原先只挂在私有库的定时工作流里,而那边被计费卡死从不执行,
+          # 于是迁过来之后库存表再没刷新过: 新结果进了结果表,
+          # 而下游只读库存表,**所有新产出对下游永远不可见**。
+          if [ -n "$WQ_EMAIL" ]; then
+            timeout 900 python -u jobs/inventory.py >> "$LOG" 2>&1
+            echo "库存同步退出码 $?" >> "$LOG"
+          else
+            echo "跳过库存同步: 未配置 WQ_EMAIL" >> "$LOG"
+          fi
           git config user.name "wq-bot"
           git config user.email "bot@users.noreply.github.com"
           git add reports/
