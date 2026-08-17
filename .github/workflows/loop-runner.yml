@@ -51,21 +51,27 @@ jobs:
       # 先把缺配置的情况说清楚。否则 checkout 静默产不出目录,后续步骤报
       # "No such file or directory",真实原因被盖掉 —— 无人值守的东西凌晨报错时,
       # 日志必须一眼看出缺什么。
-      - name: 检查必需的 secrets
+      # 区分**必需**与**可选**: loop_tick 只做补料/判死格子/淘汰模板,全是 DB 操作,
+      # 根本用不到 WQ 登录。把两者混在一起校验会因为缺一个用不上的凭据,
+      # 把本来能干的活也堵死。需要 WQ 的任务(check/submit/平台侧红线)自己会降级。
+      - name: 检查 secrets
         env:
           PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
           PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           WQ_EMAIL: ${{ secrets.WQ_EMAIL }}
+          WQ_PASSWORD: ${{ secrets.WQ_PASSWORD }}
         run: |
           MISS=""
           [ -z "$PRIVATE_REPO" ]       && MISS="$MISS PRIVATE_REPO"
           [ -z "$PRIVATE_REPO_TOKEN" ] && MISS="$MISS PRIVATE_REPO_TOKEN"
           [ -z "$DATABASE_URL" ]       && MISS="$MISS DATABASE_URL"
-          [ -z "$WQ_EMAIL" ]           && MISS="$MISS WQ_EMAIL"
           if [ -n "$MISS" ]; then
-            echo "::error::缺少 secrets:$MISS —— 在本仓库 Settings → Secrets and variables → Actions 配置"
+            echo "::error::缺少必需 secrets:$MISS —— 在本仓库 Settings → Secrets and variables → Actions 配置"
             exit 1
+          fi
+          if [ -z "$WQ_EMAIL" ] || [ -z "$WQ_PASSWORD" ]; then
+            echo "::warning::缺 WQ_EMAIL/WQ_PASSWORD —— 本轮可做补料/判死格子/淘汰模板,但跑不了 check 与 submit"
           fi
           echo "必需 secrets 齐全"
 
