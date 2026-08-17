@@ -48,7 +48,29 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      # 先把缺配置的情况说清楚。否则 checkout 静默产不出目录,后续步骤报
+      # "No such file or directory",真实原因被盖掉 —— 无人值守的东西凌晨报错时,
+      # 日志必须一眼看出缺什么。
+      - name: 检查必需的 secrets
+        env:
+          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          WQ_EMAIL: ${{ secrets.WQ_EMAIL }}
+        run: |
+          MISS=""
+          [ -z "$PRIVATE_REPO" ]       && MISS="$MISS PRIVATE_REPO"
+          [ -z "$PRIVATE_REPO_TOKEN" ] && MISS="$MISS PRIVATE_REPO_TOKEN"
+          [ -z "$DATABASE_URL" ]       && MISS="$MISS DATABASE_URL"
+          [ -z "$WQ_EMAIL" ]           && MISS="$MISS WQ_EMAIL"
+          if [ -n "$MISS" ]; then
+            echo "::error::缺少 secrets:$MISS —— 在本仓库 Settings → Secrets and variables → Actions 配置"
+            exit 1
+          fi
+          echo "必需 secrets 齐全"
+
       - name: 拉取内容源(策略只存在于那边,不落公开库)
+        id: fetch
         uses: actions/checkout@v4
         with:
           repository: ${{ secrets.PRIVATE_REPO }}
@@ -91,8 +113,10 @@ jobs:
           tail -60 "$LOG" | grep -oE '决策: R[0-9]+ / [a-z_]+' | tail -1 || echo "（本轮无决策行）"
           echo "退出码 $RC · 完整日志已写入内容源的 reports/loop/,不在公开侧展开"
 
+      # 只在内容源真的拉下来之后才回写。原先写 always() 会在 checkout 失败时
+      # 照样执行,报一个与真实原因无关的 "No such file or directory"。
       - name: 回写快照、状态板与日志
-        if: always()
+        if: always() && steps.fetch.outcome == 'success'
         working-directory: src
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
