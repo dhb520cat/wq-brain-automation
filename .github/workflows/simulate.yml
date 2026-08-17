@@ -1,9 +1,11 @@
+# ⚠️ cron 已摘除(2026-08-17)。本仓库从未配置 DATABASE_URL 等 secrets,
+# 这份定时任务自 08-12 起每 20 分钟失败一次,跑了约 360 次纯噪音,
+# 还会把真实故障淹没在失败列表里。
+# 本仓库现在只负责 loop-runner;这份保留仅供手动触发/参考。
 name: wq-simulate
 
 # 云端模拟流水线: dispatch 指定任务脚本与参数;结果入 Neon sim_results。
 on:
-  schedule:
-    - cron: "*/20 * * * *"     # 每20分钟消费一次队列
   workflow_dispatch:
     inputs:
       script:

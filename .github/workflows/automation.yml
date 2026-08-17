@@ -1,3 +1,7 @@
+# ⚠️ cron 已摘除(2026-08-17)。本仓库从未配置 DATABASE_URL 等 secrets,
+# 这份定时任务自 08-12 起每 20 分钟失败一次,跑了约 360 次纯噪音,
+# 还会把真实故障淹没在失败列表里。
+# 本仓库现在只负责 loop-runner;这份保留仅供手动触发/参考。
 name: wq-automation
 
 on:
@@ -11,10 +15,6 @@ on:
         default: "healthcheck"
         type: choice
         options: [healthcheck, inventory, report]
-  schedule:
-    # 每天 01:30 UTC 增量同步库存;10:00 UTC(北京 18:00)出日报
-    - cron: "30 1 * * *"
-    - cron: "0 10 * * *"
 
 concurrency:
   group: wq-automation
