@@ -1,0 +1,118 @@
+# 真身部署在公开库的 .github/workflows/loop-simulate.yml。
+# 源在私有库的 ops/public-simulate.yml,改这份再同步过去。
+#
+# 职责: 消费 batch_queue —— 队列里有料却没人吃,补料就没意义。
+# 与 loop-runner 的分工:
+#   loop-runner   每小时一次,做决策(补料/判死格子/淘汰模板),几秒钟
+#   loop-simulate 每 20 分钟一次,做苦力(真跑回测),一批可能几十分钟
+#
+# 为什么在公开库: 私有仓库 Actions 要计费且已被 spending limit 卡死;
+# 公开仓库分钟数免费。跑批是最耗时的活,更该放在免费这边。
+#
+# ⚠️ 日志公开: 业务输出全部进文件并回写私有库,公开侧只回显一行结论。
+
+name: wq-loop-simulate
+
+on:
+  schedule:
+    - cron: "*/20 * * * *"     # 与原 wq-simulate 同频: 队列深度 > 唤醒间隔
+  workflow_dispatch:
+    inputs:
+      script:
+        description: "直接跑某个脚本(留空则消费队列)"
+        required: false
+        default: ""
+      args:
+        description: "脚本参数"
+        required: false
+        default: ""
+
+concurrency:
+  group: wq-loop-simulate      # 同时只跑一批,尊重平台并发
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  simulate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340       # msim 一批可能几十分钟;留在 GitHub 6h 上限内
+    steps:
+      - name: 检查 secrets
+        env:
+          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          WQ_EMAIL: ${{ secrets.WQ_EMAIL }}
+          WQ_PASSWORD: ${{ secrets.WQ_PASSWORD }}
+        run: |
+          MISS=""
+          [ -z "$PRIVATE_REPO" ]       && MISS="$MISS PRIVATE_REPO"
+          [ -z "$PRIVATE_REPO_TOKEN" ] && MISS="$MISS PRIVATE_REPO_TOKEN"
+          [ -z "$DATABASE_URL" ]       && MISS="$MISS DATABASE_URL"
+          # 跑批必须能登录平台,这里 WQ 凭据是**必需**而非可选
+          [ -z "$WQ_EMAIL" ]           && MISS="$MISS WQ_EMAIL"
+          [ -z "$WQ_PASSWORD" ]        && MISS="$MISS WQ_PASSWORD"
+          if [ -n "$MISS" ]; then
+            echo "::error::缺少 secrets:$MISS"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        id: fetch
+        with:
+          repository: ${{ secrets.PRIVATE_REPO }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          path: src
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r src/requirements.txt
+
+      - name: 跑批
+        working-directory: src
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          WQ_EMAIL: ${{ secrets.WQ_EMAIL }}
+          WQ_PASSWORD: ${{ secrets.WQ_PASSWORD }}
+          SCRIPT: ${{ github.event.inputs.script }}
+          JOB_ARGS: ${{ github.event.inputs.args }}
+        run: |
+          set +e
+          mkdir -p reports/loop
+          LOG="reports/loop/simulate-$(date -u +%Y-%m).log"
+          echo "--- $(date -u +%FT%TZ) ---" >> "$LOG"
+          if [ -z "$SCRIPT" ]; then
+            python -u jobs/queue_worker.py >> "$LOG" 2>&1
+          else
+            case "$SCRIPT" in
+              *[!a-zA-Z0-9_]*) echo "非法脚本名" >&2; exit 1 ;;
+            esac
+            python -u "jobs/$SCRIPT.py" $JOB_ARGS >> "$LOG" 2>&1
+          fi
+          RC=$?
+          # 公开侧只回显队列结论,不带表达式/字段名
+          tail -20 "$LOG" | grep -oE '队列为空|已有 [0-9]+ 个任务在跑|#[0-9]+ -> (done|failed)' | tail -1 \
+            || echo "（本轮无队列结论）"
+          echo "退出码 $RC"
+          exit $RC
+
+      - name: 结果入库并回写日志
+        if: always() && steps.fetch.outcome == 'success'
+        working-directory: src
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          set +e
+          LOG="reports/loop/simulate-$(date -u +%Y-%m).log"
+          python -u jobs/persist_results.py >> "$LOG" 2>&1
+          git config user.name "wq-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add reports/
+          git diff --cached --quiet && exit 0
+          git commit -q -m "simulate: $(date -u +%FT%TZ)"
+          git pull -q --rebase --autostash origin HEAD
+          git push -q && echo "日志已回写"
