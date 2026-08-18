@@ -72,6 +72,7 @@ jobs:
           python jobs/loop_state.py --selftest
           python jobs/loop_log.py --selftest
           python jobs/loop_brief.py --selftest
+          python jobs/queue_worker.py --selftest
           python jobs/check_inventory.py --selftest
           python jobs/resim_stale.py --selftest
           python jobs/progress.py --selftest
