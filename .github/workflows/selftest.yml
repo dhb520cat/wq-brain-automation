@@ -1,0 +1,100 @@
+# 真身部署在公开库的 .github/workflows/selftest.yml。
+# 源在私有库的 ops/public-selftest.yml,改这份再同步过去。
+#
+# 为什么搬到公开库: 私有库的 Actions 被 spending limit 卡死,
+# 那边的 selftest 每次 push 都在 3 秒内失败并发通知 —— 噪音,且零 CI 价值。
+# selftest **全程离线、不碰 DATABASE_URL、不碰 WQ 凭据**,
+# 只需要把私有源码检出下来,所以放在免费的公开库最合适。
+#
+# ⚠️ 日志公开: 这里跑的都是合成数据的断言,不输出表达式/字段名/命中率。
+# 唯一会露出的是模块名与断言条数,不构成策略泄露。
+
+name: selftest
+
+on:
+  # 私有库的 push 传不过来,所以用定时 + 手动。
+  # 半小时一轮足够: 它是"别把护栏改坏了"的兜底,不是每次提交的门禁。
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: selftest
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: 检查 secrets
+        env:
+          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+        run: |
+          MISS=""
+          [ -z "$PRIVATE_REPO" ]       && MISS="$MISS PRIVATE_REPO"
+          [ -z "$PRIVATE_REPO_TOKEN" ] && MISS="$MISS PRIVATE_REPO_TOKEN"
+          if [ -n "$MISS" ]; then
+            echo "::error::缺少 secrets:$MISS"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.PRIVATE_REPO }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          path: src
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r src/requirements.txt
+
+      # 这里**不注入任何凭据**。所有自检必须在无 DATABASE_URL / 无 WQ 账号时通过 ——
+      # 一旦某条断言开始依赖真实数据,它就不再是护栏而是集成测试,该挪走。
+      - name: 全部自检
+        working-directory: src
+        run: |
+          set -e
+          python -m wq.selfcorr --dry-run
+          python -m wq.gates --selftest
+          python -m wq.templates --check
+          python -m wq.templates --diff-explore2
+          python -m wq.lineage --selftest
+          python -m wq.operators --selftest
+          python -m wq.regions
+          python jobs/loop_submit.py --selftest
+          python jobs/loop_tick.py --selftest
+          python jobs/loop_state.py --selftest
+          python jobs/loop_log.py --selftest
+          python jobs/loop_brief.py --selftest
+          python jobs/check_inventory.py --selftest
+          python jobs/resim_stale.py --selftest
+          python jobs/progress.py --selftest
+          python jobs/dashboard_data.py --selftest
+          python jobs/report.py --selftest
+          python ops/smoke_cli.py
+
+      - name: 无 DB 时必须优雅降级
+        working-directory: src
+        run: |
+          set -e
+          python -c "
+          import sys; sys.path.insert(0,'.')
+          from wq import gates, templates, fields, grid, regions, msim, http, db
+          import jobs.loop_brief, jobs.loop_submit, jobs.enqueue, jobs.loop_log
+          print('全部模块导入 OK')
+          "
+          python jobs/loop_brief.py
+
+      - name: 面板资产完整
+        working-directory: src
+        run: |
+          set -e
+          test -f dashboard/index.html -a -f dashboard/app.js -a -f dashboard/style.css
+          test -f dashboard/vendor/echarts.min.js
+          node --check dashboard/app.js
