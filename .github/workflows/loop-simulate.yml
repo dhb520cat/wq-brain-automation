@@ -37,7 +37,12 @@ permissions:
 jobs:
   simulate:
     runs-on: ubuntu-latest
-    timeout-minutes: 340       # msim 一批可能几十分钟;留在 GitHub 6h 上限内
+    # queue_worker 现在是**常驻消费者**: 在 WORKER_BUDGET_SEC(默认 300 分钟)内
+    # 连续吃队列,队列空了就原地等补料,而不是跑一批就退。
+    # 这样"什么时候被 cron 唤醒"就不再影响产能 —— 实测公开库 schedule
+    # 只兑现名义频率的三分之一(相邻 run 间隔 34~60 分钟,名义 20 分钟)。
+    # 340 = 300 预算 + 40 分钟给收尾(persist/库存同步/回写)与硬杀余量。
+    timeout-minutes: 340
     steps:
       - name: 检查 secrets
         env:
