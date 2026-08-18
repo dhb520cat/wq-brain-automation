@@ -134,6 +134,14 @@ jobs:
           else
             echo "跳过库存同步: 未配置 WQ_EMAIL" >> "$LOG"
           fi
+          # 送 check —— **验证队列也不能空**。
+          # 它必须跟在库存同步之后: 新产出要先进 alphas 表才看得见。
+          # 放在这里而不是单独的 workflow,是因为这条链的顺序是刚性的
+          # (跑批 -> 入库 -> 同步库存 -> 送 check),拆开就得靠时序碰运气。
+          if [ -n "$WQ_EMAIL" ]; then
+            timeout 600 python -u jobs/check_inventory.py 20 >> "$LOG" 2>&1
+            echo "送 check 退出码 $?" >> "$LOG"
+          fi
           git config user.name "wq-bot"
           git config user.email "bot@users.noreply.github.com"
           git add reports/
@@ -141,3 +149,27 @@ jobs:
           git commit -q -m "simulate: $(date -u +%FT%TZ)"
           git pull -q --rebase --autostash origin HEAD
           git push -q && echo "日志已回写"
+
+      # ⚠️ 自我接力: **这是"24 小时不间断"的唯一可靠办法**。
+      #
+      # 靠 cron 唤醒做不到不间断 —— 公开库的 schedule 是尽力而为,
+      # 实测相邻 run 间隔 34~60 分钟(名义 20 分钟)。而 worker 是 300 分钟常驻,
+      # 它退出后到下一次 cron 之间的空档,模拟就是停的。
+      # 实测代价: 常驻 run 期间 1918 条/小时,它一退就掉到 42 条/小时。
+      #
+      # 所以在 job 结束时立刻派发下一轮,把"什么时候被唤醒"从链路里彻底去掉。
+      # cron 保留作为兜底: 万一某次接力失败(API 抖动/权限问题),
+      # 20 分钟后 cron 会把链条重新接上,不至于永久停摆。
+      #
+      # 不会失控: concurrency 组保证同时只有一个 run;
+      # queue_worker 见到别的 worker 在跑会立刻退;
+      # 队列空时它原地等料而不是空转退出再拉起。
+      - name: 接力下一轮
+        if: always() && steps.fetch.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+        run: |
+          set +e
+          gh workflow run wq-loop-simulate -R "${{ github.repository }}" \
+            && echo "已派发下一轮" \
+            || echo "::warning::接力派发失败,靠 cron 兜底(最多等 20 分钟)"
