@@ -27,9 +27,14 @@ on:
         required: false
         default: ""
 
-concurrency:
-  group: wq-loop-simulate      # 同时只跑一批,尊重平台并发
-  cancel-in-progress: false
+# ⚠️ **不要加 concurrency 组。** 曾经有过,结果它把整条链锁死了:
+# 实测 2026-08-18 —— 同仓库的 loop-runner / selftest 都正常跑完,
+# 唯独 loop-simulate 卡在 pending 且 JOBS 列表为空(job 根本没被创建),
+# 一小时零产出,而队列里压着 17 批。原因是被取消的排队 run 没有释放组。
+#
+# 互斥本来就不该由 workflow 层做 —— 真正的守卫在数据库:
+# queue_worker.run_one() 用 FOR UPDATE SKIP LOCKED 原子认领队列行,
+# 两个 worker 同时跑也不会抢到同一批。那个守卫不会卡死,而组会。
 
 permissions:
   contents: read
