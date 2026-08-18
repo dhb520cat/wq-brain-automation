@@ -152,8 +152,25 @@ jobs:
           git add reports/
           git diff --cached --quiet && exit 0
           git commit -q -m "simulate: $(date -u +%FT%TZ)"
-          git pull -q --rebase --autostash origin HEAD
-          git push -q && echo "日志已回写"
+          # 并发回写: 两个 run 同时跑时会撞同一个日志文件。
+          # .gitattributes 里 `reports/loop/*.log merge=union` 让 git 拼接双方,
+          # 正常情况下不再冲突。这里再兜一层 —— 万一还是冲突,
+          # **绝不能让整个 job 挂掉**: 日志回写是观测,不是产出,
+          # 为它牺牲一次 300 分钟的跑批窗口是本末倒置。
+          # (实测 loop#66 去掉 concurrency 组后撞出过 exit 128 + detached HEAD)
+          # 重试必须是**非破坏性**的: 不能 reset --hard,那会连本轮日志一起丢掉,
+          # 比冲突本身更糟。只 abort 未完成的 rebase,让下一次重新来过。
+          OK=0
+          for i in 1 2 3; do
+            if git pull -q --rebase --autostash origin HEAD && git push -q; then
+              OK=1; break
+            fi
+            echo "回写第 $i 次失败,重试" >&2
+            git rebase --abort 2>/dev/null || true
+            sleep $((i * 5))
+          done
+          [ "$OK" = 1 ] && echo "日志已回写" || echo "::warning::日志回写失败(不影响跑批,下轮补上)"
+          exit 0
 
       # ⚠️ 自我接力: **这是"24 小时不间断"的唯一可靠办法**。
       #
@@ -166,15 +183,22 @@ jobs:
       # cron 保留作为兜底: 万一某次接力失败(API 抖动/权限问题),
       # 20 分钟后 cron 会把链条重新接上,不至于永久停摆。
       #
-      # 不会失控: concurrency 组保证同时只有一个 run;
-      # queue_worker 见到别的 worker 在跑会立刻退;
-      # 队列空时它原地等料而不是空转退出再拉起。
+      # 不会失控(注意: concurrency 组已在 loop#66 移除,别再拿它当理由):
+      #   队列行由 FOR UPDATE SKIP LOCKED 原子认领,并发 worker 各取各的;
+      #   队列空时 worker 原地等料,不会空转退出再被拉起;
+      #   日志并发回写由 .gitattributes 的 merge=union 兜住。
       - name: 接力下一轮
         if: always() && steps.fetch.outcome == 'success'
         env:
           GH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
         run: |
           set +e
-          gh workflow run wq-loop-simulate -R "${{ github.repository }}" \
-            && echo "已派发下一轮" \
-            || echo "::warning::接力派发失败,靠 cron 兜底(最多等 20 分钟)"
+          # 结论要写进**回写的日志**,不能只 echo 到 GitHub 控制台 ——
+          # 上轮就是因为只 echo,事后完全无法确认接力到底跑没跑。
+          LOG="src/reports/loop/simulate-$(date -u +%Y-%m).log"
+          if gh workflow run wq-loop-simulate -R "${{ github.repository }}"; then
+            echo "已派发下一轮" | tee -a "$LOG"
+          else
+            echo "::warning::接力派发失败,靠 cron 兜底(最多等 20 分钟)"
+            echo "接力派发失败(靠 cron 兜底)" >> "$LOG"
+          fi
