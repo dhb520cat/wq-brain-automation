@@ -116,8 +116,16 @@ jobs:
           # 于是迁过来之后库存表再没刷新过: 新结果进了结果表,
           # 而下游只读库存表,**所有新产出对下游永远不可见**。
           if [ -n "$WQ_EMAIL" ]; then
-            timeout 900 python -u jobs/inventory.py >> "$LOG" 2>&1
-            echo "库存同步退出码 $?" >> "$LOG"
+            # 增量同步实测 ~45 秒(只拉比库里最新更新的那几条)。
+            # 超时收紧到 180s: 原先给的是 900s,而全量根本跑不完,
+            # 于是**每个 run 都被这一步硬撑 15 分钟**,cron 20 分钟一轮、
+            # concurrency 串行,2/3 的算力槽位就这么没了(实测运行间隔
+            # 从 20 分钟拉到 53~93 分钟)。
+            # 超时不再是"正常现象",超了就该当异常看。
+            timeout 180 python -u jobs/inventory.py >> "$LOG" 2>&1
+            RC_INV=$?
+            echo "库存同步退出码 $RC_INV" >> "$LOG"
+            [ $RC_INV -eq 124 ] && echo "::warning::库存同步超时(增量本该 <60s,检查是否退化成全量)"
           else
             echo "跳过库存同步: 未配置 WQ_EMAIL" >> "$LOG"
           fi
