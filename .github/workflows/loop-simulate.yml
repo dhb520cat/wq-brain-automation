@@ -132,7 +132,11 @@ jobs:
             # concurrency 串行,2/3 的算力槽位就这么没了(实测运行间隔
             # 从 20 分钟拉到 53~93 分钟)。
             # 超时不再是"正常现象",超了就该当异常看。
-            timeout 180 python -u jobs/inventory.py >> "$LOG" 2>&1
+            # 2026-09-06 loop#549: 180 -> 480。增量水位改为往回留 24h 重叠(jobs/inventory.py
+            # INCREMENTAL_OVERLAP_H),每次要翻 40~70 页,Neon 高峰实测 5 分钟量级;180s 必被杀。
+            # 逐页提交保证被杀也不丢最新的,但 480s 才能让一次同步完整收口。
+            # 09-05 的教训: 被杀的那段(08:00~09:40Z)曾让 117 条达标货在库存表里消失。
+            timeout 480 python -u jobs/inventory.py >> "$LOG" 2>&1
             RC_INV=$?
             echo "库存同步退出码 $RC_INV" >> "$LOG"
             [ $RC_INV -eq 124 ] && echo "::warning::库存同步超时(增量本该 <60s,检查是否退化成全量)"
