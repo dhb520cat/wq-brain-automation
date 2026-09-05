@@ -66,6 +66,7 @@ jobs:
           python -m wq.templates --diff-explore2
           python -m wq.lineage --selftest
           python -m wq.operators --selftest
+          python -m wq.grid --selftest
           python -m wq.regions
           python jobs/loop_submit.py --selftest
           python jobs/loop_tick.py --selftest
@@ -74,6 +75,11 @@ jobs:
           python jobs/loop_brief.py --selftest
           python jobs/queue_worker.py --selftest
           python jobs/check_inventory.py --selftest
+          # 2026-09-06 loop#551 新增(全部离线): 补料优先级/占位符一致性、库存增量水位与逐页提交、
+          # 每数据集一行的 catalog、判死表幂等写入 —— 都是 09-05~06 修过的真 bug,CI 不跑等于没守卫
+          python jobs/enqueue.py --selftest
+          python jobs/inventory.py --selftest
+          python jobs/dataset_catalog.py --selftest
           python jobs/resim_stale.py --selftest
           python jobs/progress.py --selftest
           python jobs/dashboard_data.py --selftest
