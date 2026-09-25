@@ -1,0 +1,91 @@
+# 真身部署在公开库的 .github/workflows/check-runner.yml(源文件存这里跟着私有库版本化)。
+#
+# 为什么单独一条: check 与回测在平台上是两条独立的并发限额(回测 CONCURRENT_SIMULATION_LIMIT,check 3 槽),
+# 但原先云端根本没有定时 check —— 只有主会话 /loop 命中 R4 才跑,会话一停 check 就停(09-25 停了 14h)。
+#
+# 设计: GitHub 托管 runner 单 job 硬上限 6h(官方: "terminated and fails"),没有「不结束就不回收」。
+# 所以每个 job 在内部循环跑 check_inventory,跑到约 5h30m 主动收尾写回日志;
+# 每小时触发一次 + concurrency 排队 → 前一个一退出下一个接上,效果上 check 一直在跑。
+# 安全约束同 loop-runner: 业务输出只进文件,公开日志只回显退出码。
+
+name: wq-check-runner
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: wq-check-runner
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: 检查 secrets
+        env:
+          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          WQ_EMAIL: ${{ secrets.WQ_EMAIL }}
+          WQ_PASSWORD: ${{ secrets.WQ_PASSWORD }}
+        run: |
+          MISS=""
+          for v in PRIVATE_REPO PRIVATE_REPO_TOKEN DATABASE_URL WQ_EMAIL WQ_PASSWORD; do
+            [ -z "${!v}" ] && MISS="$MISS $v"
+          done
+          if [ -n "$MISS" ]; then echo "::error::缺少 secrets:$MISS"; exit 1; fi
+          echo "secrets 齐全"
+
+      - name: 拉取内容源
+        id: fetch
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.PRIVATE_REPO }}
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          path: src
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install -r src/requirements.txt
+
+      - name: 循环 check(约 5h30m 后主动收尾)
+        id: loop
+        working-directory: src
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          WQ_EMAIL: ${{ secrets.WQ_EMAIL }}
+          WQ_PASSWORD: ${{ secrets.WQ_PASSWORD }}
+          # 默认云端单轮只给 420s(旧的外层 timeout 600 遗留),这里单轮给 30 分钟长轮询
+          CHECK_WALL_S: "1800"
+        run: |
+          set +e
+          mkdir -p reports/loop
+          LOG="reports/loop/check-$(date -u +%Y-%m).log"
+          END=$(( $(date +%s) + 330*60 ))
+          N=0; BAD=0
+          # 留 45 分钟余量: 单轮墙钟 30 分钟 + 落库 + 写回
+          while [ $(( $(date +%s) + 45*60 )) -lt $END ]; do
+            N=$((N+1))
+            echo "=== $(date -u +%FT%TZ) cloud round $N" >> "$LOG"
+            timeout 2400 python -u jobs/check_inventory.py 10 --force >> "$LOG" 2>&1
+            RC=$?; if [ $RC -ne 0 ]; then BAD=$((BAD+1)); else BAD=0; fi
+            echo "=== rc=$RC" >> "$LOG"
+            git config user.name "wq-bot"; git config user.email "bot@users.noreply.github.com"
+            git add reports/ 2>/dev/null
+            git diff --cached --quiet || { git commit -q -m "check: $(date -u +%FT%TZ) round $N"; \
+              git pull -q --rebase --autostash origin HEAD; git push -q; }
+            [ $BAD -ge 3 ] && break          # 连续出错别空转 6 小时
+            sleep 60
+          done
+          echo "rounds=$N bad=$BAD" >> "$GITHUB_OUTPUT"
+          echo "共 $N 轮,出错 $BAD 轮 —— 明细在内容源 reports/loop/,不在公开侧展开"
+          [ $BAD -lt 3 ]
